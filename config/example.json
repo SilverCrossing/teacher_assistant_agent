@@ -1,0 +1,30 @@
+{
+  "schema_version": "1",
+  "site": {
+    "enabled": false,
+    "approval_reference": "",
+    "teacher_id": "",
+    "login_url": "",
+    "login_post_urls": [],
+    "read_urls": [],
+    "page_urls": [],
+    "expected_submissions": 0,
+    "adapter_version": "snapshot-v1",
+    "task": null
+  },
+  "cloud": {
+    "enabled": false,
+    "approval_reference": "",
+    "endpoint": "",
+    "model": "",
+    "region": "",
+    "retention_terms": "",
+    "training_terms": "",
+    "keyring_account": "model-api",
+    "approved_fields": ["question", "rubric", "answer_lines", "anonymous_ref"],
+    "max_requests_per_run": 100
+  },
+  "retention_days": 7,
+  "retention_approval": "",
+  "read_interval_seconds": 2
+}
