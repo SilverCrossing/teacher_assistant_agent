@@ -9,6 +9,8 @@ import { api, errorText, setToken } from './api';
 import type { Session, GradingTask, Run, Item } from './types';
 import './style.css';
 import { ModelSettings } from './ModelSettings';
+import { Materials, type Exam } from './Materials';
+import { Simulation } from './Simulation';
 
 const labels: Record<string, string> = {
   reading: '读取中', awaiting_login: '待登录', ready: '待生成', generating: '生成中',
@@ -38,6 +40,9 @@ function App() {
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
   const [preview, setPreview] = useState(false);
+  const [materials, setMaterials] = useState<Exam[]>([]);
+  const [materialKey, setMaterialKey] = useState('');
+  const [mappingChecked, setMappingChecked] = useState(false);
   const [audit, setAudit] = useState<{ created_at: string; event: string; version?: number; action?: string; code?: string }[]>([]);
 
   // 本地令牌仅放在内存中；页面刷新后重新握手，避免长期持久化鉴权信息。
@@ -45,6 +50,7 @@ function App() {
     const s = await api<Session>('/session'); setToken(s.token); setSession(s);
     const [t, r] = await Promise.all([api<GradingTask[]>('/tasks'), api<Run[]>('/runs')]);
     setTasks(t); setTaskId(t[0]?.id || ''); setRuns(r);
+    setMaterials(await api<Exam[]>('/materials'));
     if (r[0]) setRun(await api<Run>(`/runs/${r[0].id}`));
   }, []);
   useEffect(() => { load().catch(e => setError(`无法连接本地服务。${e.message}`)); }, [load]);
@@ -75,12 +81,20 @@ function App() {
     if (run) setRun(await api<Run>(`/runs/${run.id}/${name}`, {}));
   });
   const start = () => act(async () => {
-    const next = await api<Run>('/runs', { task_id: taskId });
+    const [examId, index] = materialKey.split('/');
+    const exam = materials.find(e => e.id === examId);
+    const next = await api<Run>('/runs', { task_id: taskId, ...(exam ? {
+      material_id: exam.id, material_version: exam.version, material_question: exam.questions[Number(index)].number,
+    } : {}) });
     setRun(next); setSelected(''); setFilter('all'); setTab('work');
     setRuns(await api<Run[]>('/runs'));
   });
   const openTab = (next: string) => {
     setTab(next);
+    if (next === 'work') {
+      setMaterialKey(''); setMappingChecked(false);
+      void api<Exam[]>('/materials').then(setMaterials).catch(e => setError(e.message));
+    }
     if (next === 'history') void act(async () => setRuns(await api<Run[]>('/runs')));
     if (next === 'audit' && run) void act(async () => setAudit(await api(`/runs/${run.id}/audit`)));
   };
@@ -102,7 +116,7 @@ function App() {
       <div className="workspace-label">教师工作空间</div>
       <nav>
         {[['work', '阅卷工作台', LayoutDashboard], ['history', '任务记录', History],
-          ['audit', '审计记录', ShieldCheck], ['settings', '安全与配置', Settings2]].map(([key, title, Icon]) => {
+          ['simulation', '模拟批卷页', FlaskConical], ['materials', '试卷与答案库', FileText], ['audit', '审计记录', ShieldCheck], ['settings', '安全与配置', Settings2]].map(([key, title, Icon]) => {
           const I = Icon as typeof LayoutDashboard;
           return <button key={key as string} className={tab === key ? 'nav-item active' : 'nav-item'} onClick={() => openTab(key as string)}><I size={18} />{title as string}{tab === key && <span className="nav-dot" />}</button>;
         })}
@@ -111,16 +125,28 @@ function App() {
       <div className="local-status"><span className={session ? 'online-dot' : 'offline-dot'} />{session ? '本地服务已连接' : '正在连接本地服务'}<small>v0.1.0</small></div>
     </aside>
     <main>
-      <header className="topbar"><div>教师工作空间 <ChevronRight size={14} /><span>{({ work: '阅卷工作台', history: '任务记录', audit: '审计记录', settings: '安全与配置' } as Record<string, string>)[tab]}</span></div><span className="local-pill"><LockKeyhole size={13} /> 本地运行</span></header>
+      <header className="topbar"><div>教师工作空间 <ChevronRight size={14} /><span>{({ work: '阅卷工作台', simulation: '模拟批卷页', materials: '试卷与答案库', history: '任务记录', audit: '审计记录', settings: '安全与配置' } as Record<string, string>)[tab]}</span></div><span className="local-pill"><LockKeyhole size={13} /> 本地运行</span></header>
       <div className="page">
-        <div className="page-heading"><div><div className="eyebrow">LESS BUSYWORK. MORE TEACHING.</div><h1>{tab === 'work' ? '让复核更专注' : tab === 'history' ? '任务记录' : tab === 'audit' ? '可追溯的每一步' : '安全与配置'}</h1><p>{tab === 'work' ? '从答卷到证据清晰的评分建议，最终判断始终在你手中。' : '所有操作仅作用于本地阅卷草稿。'}</p></div><span className="outline-label"><ShieldCheck size={15} /> 正式成绩自动写入能力：未提供</span></div>
+        <div className="page-heading"><div><div className="eyebrow">LESS BUSYWORK. MORE TEACHING.</div><h1>{tab === 'work' ? '让复核更专注' : tab === 'simulation' ? '从答题卡到分项给分' : tab === 'materials' ? '准备好每一道题的评分依据' : tab === 'history' ? '任务记录' : tab === 'audit' ? '可追溯的每一步' : '安全与配置'}</h1><p>{tab === 'work' ? '从答卷到证据清晰的评分建议，最终判断始终在你手中。' : '材料与操作记录保存在本机。'}</p></div><span className="outline-label"><ShieldCheck size={15} /> 正式成绩自动写入能力：未提供</span></div>
         {error && <div className="alert error" role="alert"><AlertTriangle size={18} /><span>{error}</span><button onClick={() => setError('')} aria-label="关闭错误"><X size={16} /></button></div>}
         {!session && <button className="button" onClick={() => void act(load)}>重新连接</button>}
+        {session && <div hidden={tab !== 'materials'}><Materials /></div>}
+        {session && <div hidden={tab !== 'simulation'}><Simulation /></div>}
         {tab === 'work' && <>
           <div className="demo-banner"><FlaskConical size={20} /><div><strong>{run?.mode === 'school' ? '已授权学校任务' : '当前为合成数据演示'}</strong><span>{run?.mode === 'school' ? '请确认当前账号和任务，仅在批准范围内使用。' : '无需登录或 API 密钥。可完整体验读取、生成与人工复核流程。'}</span></div><span className="tag">{run?.mode === 'school' ? '受限读取' : '数据不外发'}</span></div>
           <section className="task-card">
             <div className="section-kicker">01 <span>选择阅卷任务</span></div>
-            <div className="task-row"><div className="task-icon"><FileText size={25} /></div><div className="task-select"><label htmlFor="task">课程与作业</label><select id="task" value={taskId} disabled={active || pending} onChange={e => setTaskId(e.target.value)}>{tasks.map(t => <option value={t.id} key={t.id}>{t.subject} / {t.title}</option>)}</select></div><div className="task-meta"><span>题目</span><strong>第 1 题 · 简答题</strong></div><div className="task-meta"><span>分值上限</span><strong>{currentTask?.max_score || '—'} 分</strong></div><button className="button primary" disabled={!session || pending || active} onClick={start}><Play size={15} />开始读取</button></div>
+            <div className="task-row"><div className="task-icon"><FileText size={25} /></div><div className="task-select"><label htmlFor="task">课程与作业</label><select id="task" value={taskId} disabled={active || pending} onChange={e => { setTaskId(e.target.value); setMaterialKey(''); setMappingChecked(false); }}>{tasks.map(t => <option value={t.id} key={t.id}>{t.subject} / {t.title}</option>)}</select></div><div className="task-meta"><span>题目</span><strong>{currentTask?.question_id || '—'}</strong></div><div className="task-meta"><span>分值上限</span><strong>{currentTask?.max_score || '—'} 分</strong></div><button className="button primary" disabled={!session || pending || active || (!!materialKey && !mappingChecked)} onClick={start}><Play size={15} />开始读取</button></div>
+            <div className="material-binding">
+              <button className="button small" onClick={() => openTab('materials')}>导入 / 管理试卷与答案</button>
+              {session?.school_enabled && currentTask?.source_site_id !== 'synthetic' && <>
+                <label>评分依据<select value={materialKey} disabled={active || pending} onChange={e => { setMaterialKey(e.target.value); setMappingChecked(false); }}>
+                  <option value="">使用任务原有评分依据</option>
+                  {materials.filter(e => e.confirmed).flatMap(e => e.questions.map((q, i) => <option key={`${e.id}/${i}`} value={`${e.id}/${i}`}>{e.title} · {e.paper} · {q.number} · v{e.version}</option>))}
+                </select></label>
+                {materialKey && <label className="check-field"><input type="checkbox" checked={mappingChecked} onChange={e => setMappingChecked(e.target.checked)} />我已核对考试、卷别、小题及满分，与上方学校任务一致</label>}
+              </>}
+            </div>
           </section>
           <div className="stats">{[
             ['已读取答卷', stats.total, '份', FileText, 'blue'],

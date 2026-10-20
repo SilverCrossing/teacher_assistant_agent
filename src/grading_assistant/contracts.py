@@ -94,3 +94,6 @@ class ReviewInput(Contract):
 
 class CreateRun(Contract):
     task_id: str
+    material_id: str | None = None
+    material_version: int | None = None
+    material_question: str | None = None

@@ -43,13 +43,15 @@ class Orchestrator:
         self.emergency_errors.pop(run_id, None)
         self.workers[run_id] = asyncio.create_task(coroutine)
 
-    def create(self, task_id: str):
+    def create(self, task_id: str, material_task: GradingTask | None = None):
         self.idle()
         self.store.purge(self.settings.retention_days)
-        task = self.task(task_id)
+        authorized_task = self.task(task_id)
+        task = material_task or authorized_task
         is_demo = task.id == demo.TASK.id
         run = {"schema_version": "1", "id": uuid4().hex, "revision": 0,
-               "task": task.model_dump(), "mode": "demo" if is_demo else "school",
+               "task": task.model_dump(), "authorized_task": authorized_task.model_dump(),
+               "mode": "demo" if is_demo else "school",
                "status": "reading" if is_demo else "awaiting_login", "created_at": now(),
                "updated_at": now(), "error_code": None, "cancel_requested": False,
                "items": [], "model_calls": 0}
@@ -60,7 +62,8 @@ class Orchestrator:
     async def capture(self, run_id: str, login_only=False):
         try:
             run = self.store.get(run_id)
-            task = self.task(run["task"]["id"])
+            # 创建时冻结评分依据；之后修改资料库不会改变此任务的题干和量规。
+            task = GradingTask.model_validate(run["task"])
             if run["mode"] == "demo":
                 await asyncio.sleep(0.2)
                 entries = demo.evidence(run_id)
@@ -70,7 +73,9 @@ class Orchestrator:
                     self.sessions[run_id] = browser
                     await browser.open_login()
                     return
-                entries = await self.sessions[run_id].read_submissions(run_id, task)
+                # 页面核验仍使用学校原有题干与量规；本地资料用于后续评分上下文。
+                source_task = GradingTask.model_validate(run.get("authorized_task", run["task"]))
+                entries = await self.sessions[run_id].read_submissions(run_id, source_task)
             # 全部分页完成身份/数量核验后整批保存，避免部分串卷数据成为有效证据。
             run = self.store.get(run_id)
             seen = set()
@@ -111,7 +116,7 @@ class Orchestrator:
             raise DomainError("RUN_NOT_READY")
         if run["mode"] != "demo" and not self.settings.cloud.enabled:
             raise DomainError("CLOUD_DISABLED")
-        if run["task"] != self.task(run["task"]["id"]).model_dump():
+        if run.get("authorized_task", run["task"]) != self.task(run["task"]["id"]).model_dump():
             raise DomainError("TASK_CONFIGURATION_CHANGED")
         if not any(i["status"] in {"pending", "error"} for i in run["items"]):
             raise DomainError("NO_PENDING_ITEMS")

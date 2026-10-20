@@ -18,7 +18,7 @@ try {
     $pythonPath = Join-Path $projectRoot ".venv/Scripts/python.exe"
     $needsInstall = !(Test-Path -LiteralPath $pythonPath) -or !(Test-Path -LiteralPath (Join-Path $projectRoot "frontend/dist/index.html"))
     if (!$needsInstall) {
-        & $pythonPath -c "import importlib.util,sys; sys.exit(0 if all(importlib.util.find_spec(m) for m in ('fastapi','uvicorn','grading_assistant')) else 1)"
+        & $pythonPath -c "import importlib.util,sys; sys.exit(0 if all(importlib.util.find_spec(m) for m in ('fastapi','uvicorn','grading_assistant','pypdf')) else 1)"
         $needsInstall = $LASTEXITCODE -ne 0
     }
     if ($needsInstall) {

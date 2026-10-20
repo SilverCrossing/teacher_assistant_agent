@@ -2,10 +2,13 @@ import os
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
+from decimal import Decimal
+from urllib.parse import quote, unquote
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
+from starlette.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -15,12 +18,16 @@ from .grading import DomainError
 from .model_settings import ModelSettingsInput, ModelSettingsService
 from .orchestrator import Orchestrator
 from .storage import Store, load_cipher
+from .materials import MaterialLibrary, ExamInput, ExamEdit, MAX_FILE
+from .simulation import SimulationService, SimulationStart, SimulationDraft, SimulationReview
 
 
 def create_app(settings: Settings | None = None, directory: Path | None = None) -> FastAPI:
     settings = settings or load_settings()
     directory = directory or data_dir()
     token = secrets.token_urlsafe(32)
+    materials = MaterialLibrary(directory)
+    simulation = SimulationService(materials)
     # 本地连接参数独立保存，不改写学校授权配置或把密钥写进 JSON。
     model_settings = ModelSettingsService(settings, directory)
     settings.cloud = model_settings.effective()
@@ -75,15 +82,18 @@ def create_app(settings: Settings | None = None, directory: Path | None = None) 
                 if not secrets.compare_digest(request.headers.get("x-local-token", ""), token):
                     return JSONResponse({"code": "LOCAL_TOKEN_REQUIRED"}, status_code=401)
             if request.method == "POST":
+                # 仅资料接口放宽大小；上传仍校验令牌、来源及实际流长度。
+                limit = (MAX_FILE if request.url.path.endswith("/files") and request.url.path.startswith("/api/materials/")
+                         else 2_000_000 if request.url.path.startswith("/api/materials/") else 32_000)
                 try:
-                    if int(request.headers.get("content-length", "0")) > 32_000:
+                    if int(request.headers.get("content-length", "0")) > limit:
                         return JSONResponse({"code": "REQUEST_TOO_LARGE"}, status_code=413)
                 except ValueError:
                     return JSONResponse({"code": "INVALID_REQUEST"}, status_code=400)
                 body = bytearray()
                 async for chunk in request.stream():
                     body.extend(chunk)
-                    if len(body) > 32_000:
+                    if len(body) > limit:
                         return JSONResponse({"code": "REQUEST_TOO_LARGE"}, status_code=413)
                 request._body = bytes(body)
         response = await call_next(request)
@@ -142,6 +152,58 @@ def create_app(settings: Settings | None = None, directory: Path | None = None) 
     async def tasks():
         return app.state.agent.tasks()
 
+    @app.get("/api/simulations")
+    def list_simulations():
+        return simulation.list()
+
+    @app.post("/api/simulations", status_code=201)
+    def start_simulation(body: SimulationStart):
+        return simulation.start(body)
+
+    @app.get("/api/simulations/{session_id}")
+    def get_simulation(session_id: str):
+        return simulation.get(session_id)
+
+    @app.post("/api/simulations/{session_id}/cards/{card_id}/draft")
+    def draft_simulation(session_id: str, card_id: str, body: SimulationDraft):
+        return simulation.update(session_id, card_id, body)
+
+    @app.post("/api/simulations/{session_id}/cards/{card_id}/review")
+    def review_simulation(session_id: str, card_id: str, body: SimulationReview):
+        return simulation.update(session_id, card_id, body, review=True)
+
+    @app.get("/api/materials")
+    def list_materials():
+        return materials.list()
+
+    @app.post("/api/materials", status_code=201)
+    def create_material(body: ExamInput):
+        return materials.create(body)
+
+    @app.get("/api/materials/{exam_id}")
+    def get_material(exam_id: str):
+        return materials.get(exam_id)
+
+    @app.post("/api/materials/{exam_id}")
+    def save_material(exam_id: str, body: ExamEdit):
+        return materials.save(exam_id, body)
+
+    @app.post("/api/materials/{exam_id}/files")
+    async def upload_material(exam_id: str, request: Request):
+        try:
+            version = int(request.headers.get("x-material-version", ""))
+        except ValueError:
+            raise DomainError("MATERIAL_FILE_INVALID") from None
+        return await run_in_threadpool(
+            materials.upload, exam_id, version, request.headers.get("x-material-role", ""),
+            unquote(request.headers.get("x-file-name", "")), await request.body())
+
+    @app.get("/api/materials/{exam_id}/files/{file_id}")
+    def download_material(exam_id: str, file_id: str):
+        meta, raw = materials.download(exam_id, file_id)
+        return Response(raw, media_type=meta["mime"],
+                        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(meta['name'])}"})
+
     @app.get("/api/runs")
     async def runs():
         return [{k: v for k, v in run.items() if k != "items"} | {"count": len(run["items"])}
@@ -149,7 +211,27 @@ def create_app(settings: Settings | None = None, directory: Path | None = None) 
 
     @app.post("/api/runs", status_code=201)
     async def create_run(body: CreateRun):
-        return app.state.agent.create(body.task_id)
+        task = None
+        if body.material_id:
+            from .contracts import GradingTask
+            exam = materials.get(body.material_id)
+            if not exam["confirmed"] or exam["version"] != body.material_version:
+                raise DomainError("MATERIAL_NOT_CONFIRMED")
+            question = next((q for q in exam["questions"] if q["number"] == body.material_question), None)
+            base = app.state.agent.task(body.task_id)
+            if not question or not settings.site.enabled or base.id != settings.site.task.id:
+                raise DomainError("MATERIAL_MAPPING_INVALID")
+            total = sum(Decimal(str(c["max_score"])) for c in question["criteria"])
+            if total != Decimal(str(base.max_score)):
+                raise DomainError("MATERIAL_SCORE_MISMATCH")
+            # 站点身份仍来自已授权任务；资料仅替换教师确认的题干和量规。
+            task = GradingTask.model_validate(base.model_dump() | {
+                "question": question["prompt"] + "\n\n【教师确认的参考答案】\n" + question["answer"],
+                "criteria": question["criteria"],
+                "rubric_version": f"material:{exam['id']}:v{exam['version']}:{question['number']}",
+                "title": f"{exam['title']} · {exam['paper']} · {question['number']}",
+            })
+        return app.state.agent.create(body.task_id, task)
 
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str):

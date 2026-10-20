@@ -19,3 +19,4 @@ storage-state*
 test-results/
 playwright-report/
 tests/
+data/

@@ -20,12 +20,19 @@ def load_cipher(directory: Path, real: bool) -> Fernet:
         if not type(backend).__module__.startswith(("keyring.backends.Windows", "keyring.backends.macOS",
                                                    "keyring.backends.SecretService")):
             raise DomainError("PROTECTED_KEYRING_REQUIRED")
-        key = keyring.get_password("teacher-grading-assistant", "draft-encryption")
-        if not key:
-            if (directory / "school.db").exists():
-                raise DomainError("EXISTING_DATABASE_KEY_MISSING")
-            key = Fernet.generate_key().decode()
-            keyring.set_password("teacher-grading-assistant", "draft-encryption", key)
+        try:
+            key = keyring.get_password("teacher-grading-assistant", "draft-encryption")
+            if not key:
+                if (directory / "school.db").exists():
+                    raise DomainError("EXISTING_DATABASE_KEY_MISSING")
+                key = Fernet.generate_key().decode()
+                keyring.set_password("teacher-grading-assistant", "draft-encryption", key)
+        except DomainError:
+            raise
+        except Exception:
+            # 沙箱或非交互登录会话可能无法访问 Windows 凭据库。
+            # 明确提示启动方式，绝不为了继续上传而降级保存明文密钥。
+            raise DomainError("CREDENTIAL_STORE_UNAVAILABLE") from None
     else:
         # 此文件密钥仅供合成演示使用，真实学校数据使用独立数据库和系统密钥。
         path = directory / "synthetic-only.key"

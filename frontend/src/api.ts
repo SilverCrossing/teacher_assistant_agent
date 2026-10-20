@@ -2,6 +2,18 @@ let token = '';
 export function setToken(value: string) { token = value; }
 
 const errors: Record<string, string> = {
+  SIMULATION_NOT_FOUND: '未找到这份模拟记录，请刷新后重新选择。',
+  SIMULATION_TRANSCRIPT_REQUIRED: '请先读取并确认有效作答，再生成评分草稿。',
+  SCORE_OUT_OF_RANGE: '请完整填写各评分点，分数必须在零分与该项满分之间。',
+  MATERIAL_NOT_CONFIRMED: '资料尚未确认或版本已变化，请重新选择已确认的版本。',
+  MATERIAL_MAPPING_INVALID: '该资料无法关联此任务，请核对已授权的学校任务及小题。',
+  MATERIAL_SCORE_MISMATCH: '资料中评分点的总分与学校任务满分不同，请先修正。',
+  MATERIAL_FILE_INVALID: '请选择 PDF、DOCX、TXT、MD、PNG 或 JPG 文件，单个文件不超过 15 MB。',
+  MATERIAL_PARSE_FAILED: '无法读取文件。请检查文件是否损坏、加密或超过 100 页；旧版 Word 请另存为 DOCX。',
+  MATERIAL_FILE_LIMIT: '每份试卷最多上传 30 个文件，请拆分为多份资料。',
+  MATERIAL_NOT_FOUND: '这份资料不存在，请刷新列表。',
+  REQUEST_TOO_LARGE: '内容超过大小限制，请拆分后再上传。',
+  INVALID_REQUEST: '请检查必填项、题号是否重复，以及评分点的分值。',
   ANOTHER_RUN_ACTIVE: '已有任务正在执行，请先完成或取消当前任务。',
   REVISION_CONFLICT: '这份草稿已发生变化，请刷新后重新核对。',
   CLOUD_DISABLED: '云端模型尚未获得授权或完成配置。答卷仍保留在本地。',
@@ -17,7 +29,8 @@ const errors: Record<string, string> = {
   MODEL_NEW_ENDPOINT_KEY_REQUIRED: '服务地址已改变，请为新服务重新输入密钥后测试。',
   MODEL_RESPONSE_INVALID: '服务已响应，但返回格式不符合当前对话接口要求。',
   PROTECTED_KEYRING_REQUIRED: '本机未找到受保护的系统凭据库，请联系维护者。',
-  CREDENTIAL_STORE_UNAVAILABLE: '系统凭据库暂不可用，请检查 Windows 账户权限后重试。',
+  CREDENTIAL_STORE_UNAVAILABLE: '无法访问系统凭据库。请关闭当前服务，在已登录的 Windows 桌面双击“启动阅卷助手.bat”后刷新页面；若仍失败，请联系维护者检查登录会话。',
+  EXISTING_DATABASE_KEY_MISSING: '当前 Windows 账户缺少已有资料的解密密钥，请使用原账户启动；请勿删除数据库或重建密钥。',
   SETTINGS_SAVE_FAILED: '设置保存失败，请检查磁盘空间和本地目录权限。',
   KEY_ACTION_CONFLICT: '替换密钥和移除密钥不能同时执行，请选择其中一种操作。',
   PROCESS_INTERRUPTED: '上次运行被中断，可恢复未完成的答卷。',
@@ -41,4 +54,20 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
     throw new Error(errorText(data.code));
   }
   return response.json() as Promise<T>;
+}
+
+// 原件使用受保护的请求获取，令牌不进入下载链接或浏览器历史。
+export async function materialFile(path: string, file?: File, version?: number, role?: string): Promise<Response> {
+  const response = await fetch(`/api${path}`, {
+    method: file ? 'POST' : 'GET',
+    headers: { 'X-Local-Token': token, ...(file ? {
+      'X-File-Name': encodeURIComponent(file.name), 'X-Material-Version': String(version),
+      'X-Material-Role': role || 'paper', 'Content-Type': 'application/octet-stream',
+    } : {}) }, body: file,
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({ code: 'NETWORK_ERROR' }));
+    throw new Error(errorText(data.code));
+  }
+  return response;
 }
